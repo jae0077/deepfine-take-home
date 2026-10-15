@@ -9,5 +9,4 @@ public record InventoryMovement(
         String type, // 입출고 타입
         long amount, // 변경량
         long quantityAfter, // 입출구 직후 재고
-        OffsetDateTime createdAt
-) {}
+        OffsetDateTime createdAt) {}

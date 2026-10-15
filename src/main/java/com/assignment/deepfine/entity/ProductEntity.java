@@ -9,8 +9,7 @@ import jakarta.persistence.Table;
 @Entity
 @Table(name = "products")
 public class ProductEntity {
-    @Id
-    private Long id; // 자동 생성 ID가 아니라 입고 요청에서 받은 상품 ID를 사용한다.
+    @Id private Long id; // 자동 생성 ID가 아니라 입고 요청에서 받은 상품 ID를 사용한다.
 
     @Column(nullable = false, length = 200)
     private String name;
@@ -31,5 +30,4 @@ public class ProductEntity {
     public long getQuantity() {
         return quantity;
     }
-
 }

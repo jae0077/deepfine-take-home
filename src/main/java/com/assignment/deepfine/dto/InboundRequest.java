@@ -8,5 +8,4 @@ import jakarta.validation.constraints.Size;
 public record InboundRequest(
         @NotNull @Positive Long id,
         @NotBlank @Size(max = 200) String name,
-        @NotNull @Positive Long amount
-) {}
+        @NotNull @Positive Long amount) {}
