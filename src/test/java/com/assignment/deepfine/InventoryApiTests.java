@@ -167,6 +167,138 @@ class InventoryApiTests {
         assertThat(getHistoryCount()).isEqualTo(10);
     }
 
+    @Test
+    void 출고_성공_재고를_차감하고_출고_이력을_저장한다() throws Exception {
+        inbound(1, "상품 A", 10);
+        var response = outbound(1, 3);
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(json(response).get("id").asLong()).isEqualTo(1);
+        assertThat(json(response).get("name").asString()).isEqualTo("상품 A");
+        assertThat(json(response).get("quantity").asLong()).isEqualTo(7);
+        assertThat(service.stock(1).quantity()).isEqualTo(7);
+        assertThat(getHistoryCount()).isEqualTo(2);
+        var history = service.history(1, null, 1).getFirst();
+        assertThat(history.type()).isEqualTo("OUTBOUND");
+        assertThat(history.amount()).isEqualTo(3);
+        assertThat(history.quantityAfter()).isEqualTo(7);
+        assertThat(history.createdAt()).isNotNull();
+    }
+
+    @Test
+    void 전량_출고_성공_출고하면_재고가_0이_된다() throws Exception {
+        inbound(1, "상품", Long.MAX_VALUE);
+        var response = outbound(1, Long.MAX_VALUE);
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(json(response).get("quantity").asLong()).isZero();
+        assertThat(service.stock(1).quantity()).isZero();
+        assertThat(getHistoryCount()).isEqualTo(2);
+    }
+
+    @Test
+    void 출고_실패_재고가_부족하면_409이고_재고와_이력을_유지한다() throws Exception {
+        inbound(1, "상품", 2);
+        assertError(outbound(1, 3), 409, "INSUFFICIENT_STOCK");
+        assertThat(service.stock(1).quantity()).isEqualTo(2);
+        assertThat(getHistoryCount()).isEqualTo(1);
+    }
+
+    @Test
+    void 출고_실패_미등록_상품이면_404이고_상품과_이력을_생성하지_않는다() throws Exception {
+        assertError(outbound(1, 1), 404, "PRODUCT_NOT_FOUND");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM products", Long.class)).isZero();
+        assertThat(getHistoryCount()).isZero();
+    }
+
+    @Test
+    void 출고_실패_수량이_0_음수_null_또는_누락이면_400을_반환한다() throws Exception {
+        inbound(1, "상품", 10);
+        for (String amount : List.of("0", "-1", "null")) {
+            assertError(post("/inventory/outbounds", "{\"id\":1,\"amount\":" + amount + "}"),
+                    400, "INVALID_AMOUNT");
+        }
+        assertError(post("/inventory/outbounds", "{\"id\":1}"), 400, "INVALID_AMOUNT");
+        assertThat(service.stock(1).quantity()).isEqualTo(10);
+        assertThat(getHistoryCount()).isEqualTo(1);
+    }
+
+    @Test
+    void 출고_실패_상품_ID가_0_음수_null_또는_누락이면_400을_반환한다() throws Exception {
+        inbound(1, "상품", 10);
+        for (String id : List.of("0", "-1", "null")) {
+            assertError(post("/inventory/outbounds", "{\"id\":" + id + ",\"amount\":1}"),
+                    400, "INVALID_REQUEST");
+        }
+        assertError(post("/inventory/outbounds", "{\"amount\":1}"), 400, "INVALID_REQUEST");
+        assertThat(service.stock(1).quantity()).isEqualTo(10);
+        assertThat(getHistoryCount()).isEqualTo(1);
+    }
+
+    @Test
+    void 출고_실패_수량_타입이_잘못되면_400을_반환한다() throws Exception {
+        inbound(1, "상품", 10);
+        for (String amount : List.of("1.5", "\"1\"", "true", "9223372036854775808")) {
+            assertError(post("/inventory/outbounds", "{\"id\":1,\"amount\":" + amount + "}"),
+                    400, "INVALID_REQUEST");
+        }
+        assertThat(service.stock(1).quantity()).isEqualTo(10);
+        assertThat(getHistoryCount()).isEqualTo(1);
+    }
+
+    @Test
+    void 출고_이력_저장_실패_재고_차감을_롤백한다() throws Exception {
+        inbound(1, "상품", 1000);
+        // 출고는 가능하지만 이력 INSERT만 실패하도록 테스트 DB에 임시 제약을 추가한다.
+        jdbc.execute("ALTER TABLE inventory_history ADD CONSTRAINT test_reject_outbound CHECK (amount <> 777)");
+        try {
+            assertError(outbound(1, 777), 500, "INTERNAL_ERROR");
+            assertThat(service.stock(1).quantity()).isEqualTo(1000);
+            assertThat(getHistoryCount()).isEqualTo(1);
+        } finally {
+            // 테스트용 임시 제약 제거
+            jdbc.execute("ALTER TABLE inventory_history DROP CONSTRAINT test_reject_outbound");
+        }
+    }
+
+    @Test
+    void 동시_출고_재고를_초과하면_가능한_요청만_성공하고_음수가_되지_않는다() throws Exception {
+        service.inbound(1, "상품", 10);
+        List<Boolean> results = parallel(20, index -> {
+            try {
+                service.outbound(1, 1);
+                return true;
+            } catch (InventoryException exception) {
+                assertThat(exception.reason()).isEqualTo(InventoryException.Reason.INSUFFICIENT_STOCK);
+                return false;
+            }
+        });
+        assertThat(results.stream().filter(Boolean::booleanValue).count()).isEqualTo(10);
+        assertThat(results.stream().filter(result -> !result).count()).isEqualTo(10);
+        assertThat(service.stock(1).quantity()).isZero();
+        assertThat(getHistoryCount()).isEqualTo(11);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM inventory_history WHERE type = 'OUTBOUND'", Long.class))
+                .isEqualTo(10);
+    }
+
+    @Test
+    void 동시_입출고_성공한_변경_합계와_최종_재고와_이력이_일치한다() throws Exception {
+        service.inbound(1, "상품", 20);
+        parallel(20, index -> {
+            if (index % 2 == 0) service.inbound(1, "상품", 1);
+            else service.outbound(1, 1);
+            return true;
+        });
+        assertThat(service.stock(1).quantity()).isEqualTo(20);
+        assertThat(getHistoryCount()).isEqualTo(21);
+        assertThat(jdbc.queryForObject("""
+                SELECT sum(CASE WHEN type = 'INBOUND' THEN amount ELSE -amount END)
+                FROM inventory_history WHERE product_id = 1
+                """, Long.class)).isEqualTo(20);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM inventory_history WHERE type = 'OUTBOUND'", Long.class))
+                .isEqualTo(10);
+    }
+
     // 모든 작업을 시작 신호로 함께 풀어 경합을 만들고 Future로 작업 스레드의 실패를 회수한다.
     private List<Boolean> parallel(int count, java.util.function.IntFunction<Boolean> action) throws Exception {
         var executor = Executors.newFixedThreadPool(count);
@@ -200,6 +332,10 @@ class InventoryApiTests {
 
     private HttpResponse<String> inbound(long id, String name, long amount) throws Exception {
         return post("/inventory/inbounds", "{\"id\":" + id + ",\"name\":\"" + name + "\",\"amount\":" + amount + "}");
+    }
+
+    private HttpResponse<String> outbound(long id, long amount) throws Exception {
+        return post("/inventory/outbounds", "{\"id\":" + id + ",\"amount\":" + amount + "}");
     }
 
     // Mock Controller 호출이 아니라 실제 서버에 JSON 요청을 보낸다.
