@@ -55,6 +55,13 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> unexpected(Exception exception) {
+        // Spring이 정한 404/405/415 등과 Allow 같은 HTTP 헤더를 보존한다.
+        if (exception instanceof org.springframework.web.ErrorResponse response
+                && response.getStatusCode().is4xxClientError()) {
+            return ResponseEntity.status(response.getStatusCode())
+                    .headers(response.getHeaders())
+                    .body(new ErrorResponse("INVALID_REQUEST", "요청 경로·메서드·미디어 타입을 확인해 주세요."));
+        }
         log.error("Unexpected request failure", exception);
         return error(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "요청 처리 중 오류가 발생했습니다.");
     }
