@@ -359,6 +359,7 @@ class InventoryApiTests {
         var executor = Executors.newFixedThreadPool(count);
         // 커넥션을 얻기 전에 대기하므로 스레드 수가 커넥션 풀보다 커도 시작 대기가 풀을 점유하지 않는다.
         CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch ready = new CountDownLatch(count);
         List<Future<Boolean>> futures = new ArrayList<>();
         try {
             for (int i = 0; i < count; i++) {
@@ -366,11 +367,13 @@ class InventoryApiTests {
                 futures.add(
                         executor.submit(
                                 () -> {
+                                    ready.countDown();
                                     if (!start.await(10, TimeUnit.SECONDS))
                                         throw new IllegalStateException("start timeout");
                                     return action.apply(index);
                                 }));
             }
+            assertThat(ready.await(10, TimeUnit.SECONDS)).as("전체 작업 준비").isTrue();
             start.countDown();
             List<Boolean> results = new ArrayList<>();
             // get에 시간 제한을 두어 교착이나 예상치 못한 대기로 테스트가 무한히 멈추지 않게 한다.
